@@ -1,0 +1,181 @@
+--2. Projetos na dimensão que NÃO estão nos jobs v2
+SELECT
+    dim.project_id,
+    dim.orgao,
+    dim.ambiente
+  FROM `rj-iplanrio.brutos_gcp.dim_gcp_project` dim
+  LEFT JOIN (
+    SELECT DISTINCT project_id
+    FROM `rj-iplanrio.brutos_gcp.gcp_bigquery_jobs_v2`
+  ) jobs
+  ON dim.project_id = jobs.project_id
+  WHERE jobs.project_id IS NULL
+  ORDER BY dim.project_id;
+
+
+  -- Nota: Projetos removidos por falta de permissão de acesso:
+  -- dados-rio-billing, datario, datario-dev, hackathon-fgv-03-2024,
+  -- rj-caio, rj-superapp, rj-superapp-staging, rj-vision-ai
+
+
+-- Checagem 
+WITH all_dim_projects AS (
+    SELECT DISTINCT project_id, orgao, ambiente
+    FROM `rj-iplanrio.brutos_gcp.dim_gcp_project`
+  ),
+  jobs_activity AS (
+    SELECT
+      project_id,
+      MAX(creation_time) AS ultimo_job,
+      DATE_DIFF(CURRENT_DATE(), DATE(MAX(creation_time)), DAY) AS dias_sem_atividade,
+      COUNT(*) AS total_jobs
+    FROM `rj-iplanrio.brutos_gcp.gcp_bigquery_jobs_v2`
+    GROUP BY project_id
+  )
+
+  SELECT
+    dim.project_id,
+    dim.orgao,
+    dim.ambiente,
+    COALESCE(jobs.ultimo_job, TIMESTAMP('1970-01-01')) AS ultimo_job,
+    COALESCE(jobs.dias_sem_atividade, 999999) AS dias_sem_atividade,
+    COALESCE(jobs.total_jobs, 0) AS total_jobs,
+    CASE
+      WHEN jobs.project_id IS NULL AND dim.project_id IN (
+        'dados-rio-billing', 'datario', 'datario-dev', 'hackathon-fgv-03-2024',
+        'rj-caio', 'rj-superapp', 'rj-superapp-staging', 'rj-vision-ai'
+      ) THEN 'Sem permissão de acesso'
+      WHEN jobs.project_id IS NULL THEN 'Inativo (>180 dias sem jobs)'
+      WHEN jobs.dias_sem_atividade > 30 THEN 'Baixa atividade'
+      ELSE 'Ativo'
+    END AS status
+  FROM all_dim_projects dim
+  LEFT JOIN jobs_activity jobs ON dim.project_id = jobs.project_id
+  ORDER BY
+    CASE
+      WHEN jobs.project_id IS NULL THEN 1
+      ELSE 0
+    END DESC,
+    dias_sem_atividade DESC,
+    dim.project_id;
+
+-- ----------------------------------------------------------------------------------------------------------
+
+
+  --3. Verificar distribuição de projetos por órgão
+
+  SELECT
+    orgao,
+    COUNT(DISTINCT project_id) AS total_projetos,
+    STRING_AGG(DISTINCT project_id ORDER BY project_id) AS projetos
+  FROM `rj-iplanrio.brutos_gcp.dim_gcp_project`
+  GROUP BY orgao
+  ORDER BY total_projetos DESC;
+
+-- ok
+-- ---------------------------------------------------------------------------
+  -- 4. Comparar projetos IPLANRIO na dimensão vs jobs
+
+  -- Projetos IPLANRIO na dimensão
+
+  WITH dim_iplanrio AS (
+    SELECT project_id
+    FROM `rj-iplanrio.brutos_gcp.dim_gcp_project`
+    WHERE orgao = 'IPLANRIO'
+  ),
+  jobs_projects AS (
+    SELECT DISTINCT project_id
+    FROM `rj-iplanrio.brutos_gcp.gcp_bigquery_jobs_v2`
+  )
+
+  SELECT
+    'Apenas na dimensão' AS status,
+    d.project_id
+  FROM dim_iplanrio d
+  LEFT JOIN jobs_projects j ON d.project_id = j.project_id
+  WHERE j.project_id IS NULL
+
+  UNION ALL
+
+  SELECT
+    'Em ambos' AS status,
+    d.project_id
+  FROM dim_iplanrio d
+  INNER JOIN jobs_projects j ON d.project_id = j.project_id
+
+  ORDER BY status, project_id;
+-- ok
+
+
+-- ----------------------------------------------------
+
+  -- Verificar se projeto tem CUSTO no billing mas SEM jobs registrados
+  -- Isso indica problema de permissão ou coleta incompleta
+
+  WITH dim_only AS (
+    SELECT project_id FROM `rj-iplanrio.brutos_gcp.dim_gcp_project`
+    EXCEPT DISTINCT
+    SELECT project_id FROM `rj-iplanrio.brutos_gcp.gcp_bigquery_jobs_v2`
+  )
+
+  SELECT
+    dim.project_id,
+    SUM(b.cost) AS custo_total_6_meses,
+    COUNT(DISTINCT b.invoice_competencia_particao) AS meses_com_custo
+  FROM dim_only dim
+  LEFT JOIN `rj-iplanrio.brutos_gcp.gcp_billing` b
+    ON dim.project_id = b.project.id
+    AND b.invoice_competencia_particao >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 MONTH)
+    AND b.service.description = 'BigQuery'
+  GROUP BY dim.project_id
+  HAVING custo_total_6_meses > 0
+  ORDER BY custo_total_6_meses DESC;
+
+
+
+-- Resolver problema de acesso
+
+
+  -- Ver qual service account está rodando as queries: dbt-ci-github-rj-iplanrio@rj-iplanrio.iam.gserviceaccount.com e dbt-stella-costa@rj-iplanrio.iam.gserviceaccount.com
+  SELECT
+    user_email,
+    COUNT(*) AS total_execucoes
+  FROM `rj-iplanrio.brutos_gcp.gcp_bigquery_jobs_v2`
+  WHERE job_type = 'QUERY'
+    AND query LIKE '%raw_gcp_bigquery_jobs_v2%'
+    AND creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+  GROUP BY user_email
+  ORDER BY total_execucoes DESC
+  LIMIT 5;
+
+
+-- Comando CLI para conceder acesso a multiplos projetos
+
+-- SERVICE_ACCOUNT="dbt-stella-costa@rj-iplanrio.iam.gserviceaccount.com" 
+-- ROLE="roles/bigquery.metadataViewer"
+
+--   # Lista dos 8 projetos sem permissão
+--   PROJECTS=(
+--     "dados-rio-billing"
+--     "datario"
+--     "datario-dev"
+--     "hackathon-fgv-03-2024"
+--     "rj-caio"
+--     "rj-superapp"
+--     "rj-superapp-staging"
+--     "rj-vision-ai"
+--   )
+
+--   # Loop para conceder permissão em cada projeto
+--   for PROJECT in "${PROJECTS[@]}"; do
+--     echo "Concedendo acesso ao projeto: $PROJECT"
+--     gcloud projects add-iam-policy-binding $PROJECT \
+--       --member="serviceAccount:${SERVICE_ACCOUNT}" \
+--       --role="$ROLE" \
+--       --condition=None
+--   done
+
+
+
+
+
