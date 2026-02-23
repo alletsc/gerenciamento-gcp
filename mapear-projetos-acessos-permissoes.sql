@@ -131,6 +131,20 @@ WITH all_dim_projects AS (
   HAVING custo_total_6_meses > 0
   ORDER BY custo_total_6_meses DESC;
 
+--
+
+-- Verificar se a classificação de órgão está correta
+  SELECT
+    project_id,
+    orgao,
+    ambiente,
+    projeto_base,
+    COUNT(*) AS total_jobs
+  FROM `rj-iplanrio.brutos_gcp.gcp_bigquery_jobs_v2`
+  WHERE job_month_utc >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 MONTH)
+  GROUP BY project_id, orgao, ambiente, projeto_base
+  ORDER BY orgao, project_id;
+
 
 
 -- Resolver problema de acesso
@@ -176,6 +190,44 @@ WITH all_dim_projects AS (
 --   done
 
 
+-- -- Exemplos de cada tipo de classificação
+ SELECT
+    project_id,
+    orgao,
+    ambiente,
+    projeto_base,
+    CASE
+      -- Projetos IPLANRIO explícitos
+      WHEN project_id IN (
+        'dados-rio-billing', 'datario', 'datario-dev', 'rj-chatbot', 'rj-chatbot-dev',
+        'rj-comunicacao', 'rj-comunicacao-dev', 'rj-crm-registry', 'rj-crm-registry-dev',
+        'rj-datalab-sandbox', 'rj-escritorio', 'rj-escritorio-dev', 'rj-ia-desenvolvimento',
+        'rj-mapa-realizacoes', 'rj-mapa-realizacoes-dev', 'rj-precipitacao',
+        'rj-superapp', 'rj-superapp-staging', 'rj-vision-ai', 'rj-caio', 'hackathon-fgv-03-2024'
+      ) THEN 'Deveria ser IPLANRIO'
+
+      -- RecRio
+      WHEN project_id LIKE 'rj-rec%' THEN 'Deveria ser RECRIO'
+
+      -- Padrão rj-xxx
+      WHEN project_id LIKE 'rj-%' THEN 'Deveria ser ' || UPPER(SPLIT(project_id, '-')[OFFSET(1)])
+
+      ELSE 'Sem padrão'
+    END AS validacao_esperada
+  FROM `rj-iplanrio.brutos_gcp.dim_gcp_project`
+  WHERE orgao != CASE
+      WHEN project_id IN (
+        'dados-rio-billing', 'datario', 'datario-dev', 'rj-chatbot', 'rj-chatbot-dev',
+        'rj-comunicacao', 'rj-comunicacao-dev', 'rj-crm-registry', 'rj-crm-registry-dev',
+        'rj-datalab-sandbox', 'rj-escritorio', 'rj-escritorio-dev', 'rj-ia-desenvolvimento',
+        'rj-mapa-realizacoes', 'rj-mapa-realizacoes-dev', 'rj-precipitacao',
+        'rj-superapp', 'rj-superapp-staging', 'rj-vision-ai', 'rj-caio', 'hackathon-fgv-03-2024'
+      ) THEN 'IPLANRIO'
+      WHEN project_id LIKE 'rj-rec%' THEN 'RECRIO'
+      WHEN project_id LIKE 'rj-%' THEN UPPER(SPLIT(project_id, '-')[OFFSET(1)])
+      ELSE UPPER(project_id)
+    END
+  ORDER BY project_id
 
 
 
